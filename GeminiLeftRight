@@ -1,0 +1,115 @@
+/*
+ * ESP32 Hand Motion Direction Detector
+ * * This code detects the direction of hand movement (left-to-right or right-to-left)
+ * using two IR proximity sensors.
+ * * Hardware:
+ * - Left IR Sensor OUT -> GPIO 9
+ * - Right IR Sensor OUT -> GPIO 10
+ * * Note: Most common IR sensor modules output a LOW signal when an object is
+ * detected. This code assumes that behavior.
+ */
+
+// Define the GPIO pins for the IR sensors
+const int leftSensorPin = 9;
+const int rightSensorPin = 10;
+
+// --- Tunable Parameters ---
+
+// Timeout (in milliseconds) to wait for the second sensor to be triggered.
+// If the second sensor isn't triggered within this time, the system resets.
+const unsigned long timeoutDuration = 700; // 0.7 seconds
+
+// Cooldown period (in milliseconds) after a successful swipe is detected.
+// This prevents the same gesture from being registered multiple times.
+const unsigned long cooldownDuration = 1000; // 1 second
+
+// --- System Variables (do not change) ---
+
+// An 'enum' to define the states of our detection logic (a simple state machine)
+enum State {
+  IDLE,          // Waiting for any sensor to be triggered
+  LEFT_TRIGGERED,  // Left sensor was triggered first, waiting for the right
+  RIGHT_TRIGGERED  // Right sensor was triggered first, waiting for the left
+};
+
+State currentState = IDLE;
+unsigned long firstTriggerTimestamp = 0;
+unsigned long lastSwipeTimestamp = 0;
+
+void setup() {
+  // Start the serial communication for printing output
+  Serial.begin(115200);
+  Serial.println("ESP32 Hand Motion Detector Initialized.");
+  Serial.println("-------------------------------------");
+
+  // Set the sensor pins as inputs with an internal pull-up resistor.
+  // The pull-up ensures the pin is HIGH when the sensor is NOT detecting anything,
+  // preventing a "floating" input state.
+  pinMode(leftSensorPin, INPUT_PULLUP);
+  pinMode(rightSensorPin, INPUT_PULLUP);
+}
+
+void loop() {
+  // First, check if the system is in a cooldown period from the last swipe.
+  // If it is, do nothing and exit the loop function for this iteration.
+  if (millis() - lastSwipeTimestamp < cooldownDuration) {
+    return;
+  }
+
+  // Read the current state of both sensors.
+  // digitalRead() will be LOW if the sensor detects an object.
+  bool isLeftDetected = (digitalRead(leftSensorPin) == LOW);
+  bool isRightDetected = (digitalRead(rightSensorPin) == LOW);
+
+  // --- State Machine Logic ---
+  switch (currentState) {
+    case IDLE:
+      if (isLeftDetected) {
+        // Left sensor is the first to be triggered.
+        // Serial.println("Debug: Left sensor hit. Waiting for right.");
+        currentState = LEFT_TRIGGERED;
+        firstTriggerTimestamp = millis(); // Record the timestamp of the first trigger
+      } 
+      else if (isRightDetected) {
+        // Right sensor is the first to be triggered.
+        // Serial.println("Debug: Right sensor hit. Waiting for left.");
+        currentState = RIGHT_TRIGGERED;
+        firstTriggerTimestamp = millis(); // Record the timestamp of the first trigger
+      }
+      break;
+
+    case LEFT_TRIGGERED:
+      if (isRightDetected) {
+        // The right sensor was triggered after the left one.
+        // This confirms a Left-to-Right swipe.
+        Serial.println("--> Swipe Detected: Left to Right -->");
+        
+        lastSwipeTimestamp = millis(); // Start the cooldown timer
+        currentState = IDLE;           // Reset the state machine
+      } 
+      else if (millis() - firstTriggerTimestamp > timeoutDuration) {
+        // If the right sensor is not triggered within the timeout period,
+        // assume it was a false trigger and reset.
+        // Serial.println("Debug: Timeout. Resetting state.");
+        currentState = IDLE;
+      }
+      break;
+
+    case RIGHT_TRIGGERED:
+      if (isLeftDetected) {
+        // The left sensor was triggered after the right one.
+        // This confirms a Right-to-Left swipe.
+        Serial.println("<-- Swipe Detected: Right to Left <--");
+
+        lastSwipeTimestamp = millis(); // Start the cooldown timer
+        currentState = IDLE;           // Reset the state machine
+      } 
+      else if (millis() - firstTriggerTimestamp > timeoutDuration) {
+        // If the left sensor is not triggered within the timeout period,
+        // assume it was a false trigger and reset.
+        // Serial.println("Debug: Timeout. Resetting state.");
+        currentState = IDLE;
+      }
+      break;
+  }
+}
