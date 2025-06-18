@@ -1,0 +1,102 @@
+// Hand motion detection using two IR sensors on ESP32
+// Left sensor → GPIO9, Right sensor → GPIO10
+
+const int leftPin  = 9;
+const int rightPin = 10;
+
+// Track previous states for edge detection
+bool leftPrev  = false;
+bool rightPrev = false;
+
+// Timestamps in microseconds
+unsigned long tLeft  = 0;
+unsigned long tRight = 0;
+unsigned long tFirst = 0;
+
+// State machine
+enum State { IDLE, SAW_FIRST };
+State state = IDLE;
+
+// Timeout for waiting the second sensor (in microseconds)
+const unsigned long TIMEOUT_US = 2000000UL; // e.g., 2 seconds
+
+void setup() {
+  pinMode(leftPin, INPUT);
+  pinMode(rightPin, INPUT);
+  Serial.begin(115200);
+  // Allow some time for Serial to initialize
+  delay(100);
+  Serial.println("Hand-motion detection starting...");
+}
+
+void loop() {
+  bool leftNow  = (digitalRead(leftPin)  == HIGH); // adjust if your sensor is active LOW
+  bool rightNow = (digitalRead(rightPin) == HIGH);
+
+  unsigned long now = micros();
+
+  // Detect rising edges
+  bool leftRising  = (leftNow && !leftPrev);
+  bool rightRising = (rightNow && !rightPrev);
+
+  switch (state) {
+    case IDLE:
+      // Waiting for first sensor trigger
+      if (leftRising) {
+        tLeft  = now;
+        tRight = 0;
+        tFirst = now;
+        state  = SAW_FIRST;
+        //Serial.println("First trigger: LEFT");
+      }
+      else if (rightRising) {
+        tRight = now;
+        tLeft  = 0;
+        tFirst = now;
+        state  = SAW_FIRST;
+        //Serial.println("First trigger: RIGHT");
+      }
+      break;
+
+    case SAW_FIRST:
+      // Check timeout: if too long without second trigger, reset
+      if (now - tFirst > TIMEOUT_US) {
+        //Serial.println("Timeout waiting for second sensor; resetting");
+        tLeft = tRight = 0;
+        state = IDLE;
+        break;
+      }
+      // Record second trigger if it occurs
+      if (leftRising && tLeft == 0) {
+        tLeft = now;
+        //Serial.println("Second trigger: LEFT");
+      }
+      if (rightRising && tRight == 0) {
+        tRight = now;
+        //Serial.println("Second trigger: RIGHT");
+      }
+      // If both recorded, decide direction
+      if (tLeft != 0 && tRight != 0) {
+        if (tLeft < tRight) {
+          Serial.println("Detected: Left → Right");
+        }
+        else if (tRight < tLeft) {
+          Serial.println("Detected: Right → Left");
+        }
+        else {
+          Serial.println("Detected: Simultaneous/undetermined");
+        }
+        // Reset for next detection
+        tLeft = tRight = 0;
+        state = IDLE;
+      }
+      break;
+  }
+
+  // Update previous states
+  leftPrev  = leftNow;
+  rightPrev = rightNow;
+
+  // Short delay so loop isn’t too tight; keeps check interval ~1 ms
+  delay(1);
+}
