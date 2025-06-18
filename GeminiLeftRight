@@ -1,4 +1,4 @@
-/*
+/* Gemini Code
  * ESP32 Hand Motion Direction Detector
  * * This code detects the direction of hand movement (left-to-right or right-to-left)
  * using two IR proximity sensors.
