@@ -1,0 +1,82 @@
+#include <Arduino.h>
+
+// Hardware Configuration
+#define LEFT_SENSOR_PIN  9
+#define RIGHT_SENSOR_PIN 10
+
+// Timing Parameters (adjust based on testing)
+#define DEBOUNCE_DELAY_MS    50
+#define MAX_TIME_WINDOW_MS   1000
+#define MIN_DIFFERENCE_MS    50
+
+// State Variables
+volatile uint32_t left_timestamp = 0;
+volatile uint32_t right_timestamp = 0;
+volatile bool left_triggered = false;
+volatile bool right_triggered = false;
+
+void IRAM_ATTR leftSensorISR() {
+  static uint32_t last_interrupt_time = 0;
+  uint32_t current_time = millis();
+  
+  if (current_time - last_interrupt_time > DEBOUNCE_DELAY_MS) {
+    left_timestamp = current_time;
+    left_triggered = true;
+    last_interrupt_time = current_time;
+  }
+}
+
+void IRAM_ATTR rightSensorISR() {
+  static uint32_t last_interrupt_time = 0;
+  uint32_t current_time = millis();
+  
+  if (current_time - last_interrupt_time > DEBOUNCE_DELAY_MS) {
+    right_timestamp = current_time;
+    right_triggered = true;
+    last_interrupt_time = current_time;
+  }
+}
+
+void resetSystem() {
+  left_triggered = false;
+  right_triggered = false;
+  left_timestamp = 0;
+  right_timestamp = 0;
+}
+
+void setup() {
+  Serial.begin(115200);
+  
+  // Sensor Input Configuration
+  pinMode(LEFT_SENSOR_PIN, INPUT_PULLUP);
+  pinMode(RIGHT_SENSOR_PIN, INPUT_PULLUP);
+  
+  // Attach Interrupts
+  attachInterrupt(digitalPinToInterrupt(LEFT_SENSOR_PIN), leftSensorISR, FALLING);
+  attachInterrupt(digitalPinToInterrupt(RIGHT_SENSOR_PIN), rightSensorISR, FALLING);
+  
+  Serial.println("System Initialized");
+}
+
+void loop() {
+  if (left_triggered && right_triggered) {
+    int32_t time_diff = (int32_t)(right_timestamp - left_timestamp);
+    
+    if (abs(time_diff) < MIN_DIFFERENCE_MS) {
+      Serial.println("Ambiguous Movement");
+    } else if (time_diff > 0) {
+      Serial.println("Hand moved Left -> Right");
+    } else {
+      Serial.println("Hand moved Right -> Left");
+    }
+    
+    resetSystem();
+  }
+  
+  // Timeout handling
+  if ((left_triggered || right_triggered) && 
+      (millis() - max(left_timestamp, right_timestamp)) > MAX_TIME_WINDOW_MS) {
+    Serial.println("Timeout - Reset System");
+    resetSystem();
+  }
+}
