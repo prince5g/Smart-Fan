@@ -1,0 +1,163 @@
+#include <ESP32Servo.h>  // Include the Servo library
+
+// Pin definitions
+const int LEFT_SENSOR_PIN  = 9;
+const int RIGHT_SENSOR_PIN = 10;
+const int SERVO_PIN        = 14;
+
+// Debounce & timing parameters (in microseconds)
+const unsigned long DEBOUNCE_US      = 50000UL;   // 50 ms debounce
+const unsigned long MAX_WINDOW_US    = 1000000UL; // 1 second max between sensors
+const unsigned long MIN_DIFF_US      = 50000UL;   // 50 ms minimum to consider direction (else “ambiguous”)
+
+// Servo control
+const int SERVO_STEP = 30;
+Servo motionServo;
+int servoAngle = 90;  // start at middle
+
+// State machine
+enum State { IDLE, SAW_FIRST };
+State state = IDLE;
+
+// Tracking previous sensor readings for edge detection
+bool leftPrev  = false;
+bool rightPrev = false;
+// For debounce: track last change times
+unsigned long lastLeftChangeTime  = 0;
+unsigned long lastRightChangeTime = 0;
+
+// Timestamps when sensor first saw object (in micros)
+unsigned long tLeft  = 0;
+unsigned long tRight = 0;
+unsigned long tFirst = 0;
+
+void setup() {
+  Serial.begin(115200);
+  delay(100);
+  Serial.println("Starting improved hand-motion + servo control...");
+
+  // Configure sensor pins. Adjust pull-up/pull-down as per your IR module.
+  pinMode(LEFT_SENSOR_PIN, INPUT);
+  pinMode(RIGHT_SENSOR_PIN, INPUT);
+
+  // Attach servo
+  motionServo.attach(SERVO_PIN);
+  motionServo.write(servoAngle);
+}
+
+void loop() {
+  unsigned long now = micros();
+
+  // Read sensors; adjust logic if your IR module is active LOW (e.g., reverse the comparison).
+  bool leftNow  = (digitalRead(LEFT_SENSOR_PIN)  == HIGH);
+  bool rightNow = (digitalRead(RIGHT_SENSOR_PIN) == HIGH);
+
+  // Debounced edge detection: consider a change only if stable beyond DEBOUNCE_US
+  bool leftChanged = (leftNow != leftPrev);
+  if (leftChanged) {
+    // potential change; check debounce
+    if (now - lastLeftChangeTime >= DEBOUNCE_US) {
+      // Accept the change
+      lastLeftChangeTime = now;
+      // Process rising edge only:
+      if (leftNow && !leftPrev) {
+        handleSensorRising(true, now);
+      }
+      // falling edge can be ignored for our logic
+      leftPrev = leftNow;
+    }
+    // else ignore until debounce period passes; but still update leftPrev only after debounce
+  }
+
+  bool rightChanged = (rightNow != rightPrev);
+  if (rightChanged) {
+    if (now - lastRightChangeTime >= DEBOUNCE_US) {
+      lastRightChangeTime = now;
+      if (rightNow && !rightPrev) {
+        handleSensorRising(false, now);
+      }
+      rightPrev = rightNow;
+    }
+  }
+
+  // In SAW_FIRST state, check for timeout or second trigger
+  if (state == SAW_FIRST) {
+    // Timeout: if exceeded MAX_WINDOW_US since first trigger, reset
+    if (now - tFirst > MAX_WINDOW_US) {
+      Serial.println("Timeout waiting for second sensor; resetting.");
+      resetDetection();
+    }
+    else if (tLeft != 0 && tRight != 0) {
+      // Both triggered; decide direction
+      long diff = (long)tRight - (long)tLeft; // can be negative
+      if (abs(diff) < (long)MIN_DIFF_US) {
+        Serial.println("Ambiguous/Simultaneous Movement");
+      }
+      else if (diff > 0) {
+        // tRight > tLeft → Left→Right
+        Serial.println("Detected: Left → Right");
+        moveServoRight();
+      }
+      else {
+        // tRight < tLeft → Right→Left
+        Serial.println("Detected: Right → Left");
+        moveServoLeft();
+      }
+      resetDetection();
+    }
+  }
+
+  // Small delay is optional; since we're using micros and debounce logic, 
+  // loop is responsive enough. If desired, a brief yield:
+  delay(1);
+}
+
+// Called when a sensor rising edge is detected (after debounce)
+void handleSensorRising(bool isLeft, unsigned long timestamp) {
+  if (state == IDLE) {
+    // First trigger
+    if (isLeft) {
+      tLeft = timestamp;
+      tRight = 0;
+    } else {
+      tRight = timestamp;
+      tLeft = 0;
+    }
+    tFirst = timestamp;
+    state = SAW_FIRST;
+    //Serial.println(isLeft ? "First: LEFT" : "First: RIGHT");
+  } else if (state == SAW_FIRST) {
+    // If second sensor fires and its timestamp not yet recorded
+    if (isLeft && tLeft == 0) {
+      tLeft = timestamp;
+      //Serial.println("Second: LEFT");
+    }
+    else if (!isLeft && tRight == 0) {
+      tRight = timestamp;
+      //Serial.println("Second: RIGHT");
+    }
+    // else: either same sensor again or already recorded; ignore
+  }
+}
+
+void resetDetection() {
+  tLeft = tRight = tFirst = 0;
+  state = IDLE;
+}
+
+// Servo movements
+void moveServoRight() {
+  servoAngle += SERVO_STEP;
+  if (servoAngle > 180) servoAngle = 180;
+  motionServo.write(servoAngle);
+  Serial.print("Servo angle: ");
+  Serial.println(servoAngle);
+}
+
+void moveServoLeft() {
+  servoAngle -= SERVO_STEP;
+  if (servoAngle < 0) servoAngle = 0;
+  motionServo.write(servoAngle);
+  Serial.print("Servo angle: ");
+  Serial.println(servoAngle);
+}
