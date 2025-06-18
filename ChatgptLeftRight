@@ -1,3 +1,4 @@
+##Chatgptcode
 // Hand motion detection using two IR sensors on ESP32
 // Left sensor → GPIO9, Right sensor → GPIO10
 
