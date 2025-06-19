@@ -1,0 +1,51 @@
+// Pin definitions
+const int TOUCH_PIN = 38;   // digital input from touch sensor module
+const int FAN_PIN   = 16;  // output to drive transistor/relay for DC motor fan
+
+// Debounce parameters
+unsigned long lastDebounceTime = 0;
+const unsigned long debounceDelay = 50;  // milliseconds
+
+// State tracking
+int lastReading = LOW;    // last raw reading from sensor pin
+int sensorState = LOW;    // debounced stable state
+bool fanOn = false;       // current fan state
+
+void setup() {
+  // Initialize serial for debugging (optional)
+  Serial.begin(115200);
+  delay(100);
+
+  // Configure pins
+  pinMode(TOUCH_PIN, INPUT);       // assuming the touch sensor module gives a HIGH when touched; if it gives LOW when touched, you may need INPUT_PULLUP or invert logic
+  pinMode(FAN_PIN, OUTPUT);
+  digitalWrite(FAN_PIN, LOW);      // start with fan off
+}
+
+void loop() {
+  int reading = digitalRead(TOUCH_PIN);
+
+  // If the reading has changed from lastReading, reset debounce timer
+  if (reading != lastReading) {
+    lastDebounceTime = millis();
+    lastReading = reading;
+  }
+
+  // If the reading has been stable longer than debounceDelay, consider it the actual current state
+  if ((millis() - lastDebounceTime) > debounceDelay) {
+    if (reading != sensorState) {
+      sensorState = reading;
+      // We detect a new stable state; toggle fan only on a transition to HIGH
+      if (sensorState == HIGH) {
+        fanOn = !fanOn;
+        digitalWrite(FAN_PIN, fanOn ? HIGH : LOW);
+        Serial.print("Touch detected; toggling fan to ");
+        Serial.println(fanOn ? "ON" : "OFF");
+      }
+      // If your sensor is active-LOW (goes LOW when touched), change the above condition to (sensorState == LOW)
+    }
+  }
+
+  // small delay to avoid spamming; loop is already relatively slow due to millis checks
+  delay(10);
+}
