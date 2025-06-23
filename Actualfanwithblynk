@@ -1,0 +1,220 @@
+#define BLYNK_TEMPLATE_ID "TMPL6csLxSHes"
+#define BLYNK_TEMPLATE_NAME "Smart fanCopy"
+#define BLYNK_AUTH_TOKEN "OBJ3BwxpX3OZ0qlnJhnMnXccFGqdUXjd"
+
+#define BLYNK_PRINT Serial
+#include <WiFi.h>
+#include <BlynkSimpleEsp32.h>
+#include <ESP32Servo.h>
+
+// ====== Blynk credentials (fill these) ======
+char auth[] = "OBJ3BwxpX3OZ0qlnJhnMnXccFGqdUXjd";
+char ssid[] = "Phone1";
+char pass[] = "ssup12345";
+
+// ===== Virtual pins =====
+#define VPIN_FAN    V1   // Button/Switch widget to control fan
+#define VPIN_SERVO  V2   // Value display (or gauge) for servo angle updates
+#define VPIN_LOG    V3   // (Optional) Terminal widget for logs
+
+// ===== Section 1: Hand-motion + Servo control =====
+const int RIGHT_SENSOR_PIN = 9;
+const int LEFT_SENSOR_PIN  = 10;
+const int SERVO_PIN        = 14;
+
+const unsigned long DEBOUNCE_US   = 50000UL;   // 50 ms debounce
+const unsigned long MAX_WINDOW_US = 1000000UL; // 1 s window between sensors
+const unsigned long MIN_DIFF_US   = 50000UL;   // 50 ms minimum difference
+
+const int SERVO_STEP = 30;
+Servo motionServo;
+int servoAngle = 90;  // start at middle
+
+enum MotionState { IDLE, SAW_FIRST };
+MotionState motionState = IDLE;
+
+bool leftPrev  = false;
+bool rightPrev = false;
+unsigned long lastLeftChangeTime  = 0;
+unsigned long lastRightChangeTime = 0;
+
+unsigned long tLeft  = 0;
+unsigned long tRight = 0;
+unsigned long tFirst = 0;
+
+// ===== Section 2: Touch sensor + Fan control =====
+const int TOUCH_PIN = 38;  // digital input from touch sensor
+const int FAN_PIN   = 16;  // output to drive transistor/relay for DC motor
+
+unsigned long lastDebounceTimeTouch = 0;
+const unsigned long debounceDelayTouch = 50;  // ms
+
+int lastReadingTouch = LOW;
+int sensorStateTouch = LOW;
+bool fanOn = false;
+
+void setup() {
+  Serial.begin(115200);
+  delay(100);
+  Serial.println("Starting ESP32: Blynk + Motion/Servo + Touch/Fan");
+
+  // Initialize Blynk
+  Blynk.begin(auth, ssid, pass);
+
+  // ===== Setup Section 1 =====
+  pinMode(LEFT_SENSOR_PIN, INPUT);
+  pinMode(RIGHT_SENSOR_PIN, INPUT);
+  motionServo.attach(SERVO_PIN);
+  motionServo.write(servoAngle);
+  // Send initial servo angle to Blynk
+  Blynk.virtualWrite(VPIN_SERVO, servoAngle);
+
+  // ===== Setup Section 2 =====
+  pinMode(TOUCH_PIN, INPUT);
+  pinMode(FAN_PIN, OUTPUT);
+  digitalWrite(FAN_PIN, LOW);
+  // Sync fan state widget on startup
+  Blynk.syncVirtual(VPIN_FAN);
+}
+
+// Handle incoming Blynk command to control fan via widget on VPIN_FAN
+BLYNK_WRITE(VPIN_FAN) {
+  int value = param.asInt(); // 0 or 1
+  bool desired = (value != 0);
+  if (desired != fanOn) {
+    fanOn = desired;
+    digitalWrite(FAN_PIN, fanOn ? HIGH : LOW);
+    Serial.print("Blynk: setting fan to ");
+    Serial.println(fanOn ? "ON" : "OFF");
+    // Optionally log to Terminal widget
+    Blynk.virtualWrite(VPIN_LOG, String("Fan set via Blynk: ") + (fanOn ? "ON" : "OFF"));
+  }
+}
+
+void loop() {
+  Blynk.run();
+
+  // ===== Part A: Hand-motion + Servo logic =====
+  unsigned long now_us = micros();
+  bool leftNow  = (digitalRead(LEFT_SENSOR_PIN)  == HIGH);
+  bool rightNow = (digitalRead(RIGHT_SENSOR_PIN) == HIGH);
+
+  // LEFT sensor debounce & rising-edge detect
+  if (leftNow != leftPrev) {
+    if (now_us - lastLeftChangeTime >= DEBOUNCE_US) {
+      lastLeftChangeTime = now_us;
+      if (leftNow && !leftPrev) {
+        handleMotionSensorRising(true, now_us);
+      }
+      leftPrev = leftNow;
+    }
+  }
+  // RIGHT sensor debounce & rising-edge detect
+  if (rightNow != rightPrev) {
+    if (now_us - lastRightChangeTime >= DEBOUNCE_US) {
+      lastRightChangeTime = now_us;
+      if (rightNow && !rightPrev) {
+        handleMotionSensorRising(false, now_us);
+      }
+      rightPrev = rightNow;
+    }
+  }
+  // Check for second trigger or timeout
+  if (motionState == SAW_FIRST) {
+    if (now_us - tFirst > MAX_WINDOW_US) {
+      Serial.println("Motion: timeout, resetting.");
+      Blynk.virtualWrite(VPIN_LOG, "Motion: timeout, reset");
+      resetMotionDetection();
+    }
+    else if (tLeft != 0 && tRight != 0) {
+      long diff = (long)tRight - (long)tLeft;
+      if (abs(diff) < (long)MIN_DIFF_US) {
+        Serial.println("Motion: ambiguous/simultaneous");
+        Blynk.virtualWrite(VPIN_LOG, "Motion: ambiguous");
+      }
+      else if (diff > 0) {
+        Serial.println("Motion Detected: Left → Right");
+        Blynk.virtualWrite(VPIN_LOG, "Motion: Left→Right");
+        moveServoRight();
+      }
+      else {
+        Serial.println("Motion Detected: Right → Left");
+        Blynk.virtualWrite(VPIN_LOG, "Motion: Right→Left");
+        moveServoLeft();
+      }
+      resetMotionDetection();
+    }
+  }
+
+  // ===== Part B: Touch sensor + Fan logic =====
+  int readingTouch = digitalRead(TOUCH_PIN);
+  if (readingTouch != lastReadingTouch) {
+    lastDebounceTimeTouch = millis();
+    lastReadingTouch = readingTouch;
+  }
+  if ((millis() - lastDebounceTimeTouch) > debounceDelayTouch) {
+    if (readingTouch != sensorStateTouch) {
+      sensorStateTouch = readingTouch;
+      if (sensorStateTouch == HIGH) {
+        // toggle fan
+        fanOn = !fanOn;
+        digitalWrite(FAN_PIN, fanOn ? HIGH : LOW);
+        Serial.print("Touch toggled fan to ");
+        Serial.println(fanOn ? "ON" : "OFF");
+        // Update Blynk widget state so UI reflects physical toggle
+        Blynk.virtualWrite(VPIN_FAN, fanOn ? 1 : 0);
+        Blynk.virtualWrite(VPIN_LOG, String("Touch toggled fan: ") + (fanOn ? "ON" : "OFF"));
+      }
+    }
+  }
+
+  delay(1);
+}
+
+// ===== Functions for Section 1 =====
+void handleMotionSensorRising(bool isLeft, unsigned long timestamp) {
+  if (motionState == IDLE) {
+    if (isLeft) {
+      tLeft = timestamp;
+      tRight = 0;
+    } else {
+      tRight = timestamp;
+      tLeft = 0;
+    }
+    tFirst = timestamp;
+    motionState = SAW_FIRST;
+  }
+  else if (motionState == SAW_FIRST) {
+    if (isLeft && tLeft == 0) {
+      tLeft = timestamp;
+    }
+    else if (!isLeft && tRight == 0) {
+      tRight = timestamp;
+    }
+  }
+}
+
+void resetMotionDetection() {
+  tLeft = tRight = tFirst = 0;
+  motionState = IDLE;
+}
+
+void moveServoRight() {
+  servoAngle += SERVO_STEP;
+  if (servoAngle > 180) servoAngle = 180;
+  motionServo.write(servoAngle);
+  Serial.print("Servo angle: ");
+  Serial.println(servoAngle);
+  Blynk.virtualWrite(VPIN_SERVO, servoAngle);
+  Blynk.virtualWrite(VPIN_LOG, String("Servo → ") + servoAngle);
+}
+
+void moveServoLeft() {
+  servoAngle -= SERVO_STEP;
+  if (servoAngle < 0) servoAngle = 0;
+  motionServo.write(servoAngle);
+  Serial.print("Servo angle: ");
+  Serial.println(servoAngle);
+  Blynk.virtualWrite(VPIN_SERVO, servoAngle);
+  Blynk.virtualWrite(VPIN_LOG, String("Servo → ") + servoAngle);
+}
